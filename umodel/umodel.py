@@ -3,44 +3,53 @@ from scipy import optimize
 
 class model:
     
-    def __init__(self, d1, d2, r1, r2, corr):
+    def __init__(self, Ds, Rs, corr):
         
         '''
         'model' is a class describing unflolding model for two distributions
         extracted from the same data sample. Correlations between observed yields is
-        therefore possible. The model is build from two sets of observed data,
-        two respsonse matrices, and a correlation matrix between observed yields.
+        therefore possible. The model is build from p sets of observed data with ni bins each,
+        p respsonse matrices, and a correlation matrix between all observed yields.
         This model class allows derive stat-only unfolding, ie no nuisance parameter
         are included.
         
         Arguments
         ---------
-         - d1: 1D array of observed yields for the fist variable (n)
-         - d2: 1D array of observed yields for the second variable (N)
-         - r1: 2D array of response matrix for the first variable (n, n)
-         - r2: 2D array of response matrix for the second variable (N, N)
-         - corr: 1D array of expected auto-correlation of all bins (n+N, n+N)
+         - Ds: list of 1D arrays of observed yields for the fist variable (n1, n2, ..., np)
+         - Rs: lsit of 2D arrays of responses matrices ((n1, n1), (n2,n2), ... (np, np))
+         - corr: 2D array of expected auto-correlation of all bins (n1+...+np, n1+...+np)
         '''
         
         # Array dimensions
-        self.N1, self.N2 = d1.shape[0], d2.shape[0]
-        self.nPOIs = self.N1 + self.N2 
+        self.Ns = np.array([d.shape[0] for d in Ds])
+        self.nPOIs = self.Ns.sum()
+        
+        # Storing all starting and ending inidice for internal use
+        self._Nstart = [0] + list(self.Ns[:-1].cumsum())
+        self._Nend   = list(self.Ns.cumsum())
         
         # Observed yields
-        self.data1, self.data2 = d1, d2
+        self.Ds = Ds
         
         # Response matrices
-        self.Resp1, self.Resp2 = r1, r2
+        self.Rs = Rs
 
         # Correlation between yields
         self.Corr = corr
 
         # Unfolded bins by matrix inversion
-        self.b1 = self.data1 @ np.linalg.inv(self.Resp1)
-        self.b2 = self.data2 @ np.linalg.inv(self.Resp2)
+        self.Bs = [d @ np.linalg.inv(r) for d, r in zip(self.Ds, self.Rs) ]
+    
+                   
+    def _array2list(self, x):
+        '''
+        Convert an 1D array of n1+...+np values into a list
+        of p 1D arrays of shape n1, n2, ... np.
+        '''
+        return [x[n1:n2] for n1, n2 in zip(self._Nstart, self._Nend)]
+                   
         
-        
-    def NLL(self, b1, b2):
+    def NLL(self, Bs):
     
         '''
         This function return the negative log likelihood of (d1, d2 | r1 x b1, r2 x b2)
@@ -69,8 +78,8 @@ class model:
 
         Arguments
         ---------
-         - b1: 1D array of truth yields for the first variable (n)
-         - b2: 1D array of truth yields for the second variable (N)
+         - Bs: list of 1D array containing tested truth bin values for the 
+               p observables. Shape: [n1, ..., np]
 
         Return
         ------
@@ -81,12 +90,10 @@ class model:
         p = self.nPOIs
 
         # Vector of observations
-        obs = np.concatenate([self.data1, self.data2])
+        obs = np.concatenate(self.Ds)
 
-        # Mean vector of the normal PDF
-        mu1 = b1 @ self.Resp1
-        mu2 = b2 @ self.Resp2
-        mu = np.concatenate([mu1, mu2])
+        # Mean vector of the normal PDF: truth x response
+        mu = np.concatenate([b @ r for (b, r) in zip(Bs, self.Rs)])
 
         # Correlation matrix of the normal PDF
         Sigma = np.zeros((p, p)) + 1e-12 * np.diag([1]*p)
@@ -109,33 +116,28 @@ class model:
         This POI is selected by its index iPOI and the value
         vPOI is set.
         '''
-                
+          
         # Function to minimize in case of full NLL
         def fullNLL(x):
-            b1 = x[:self.N1]
-            b2 = x[self.N1:]
-            return self.NLL(b1, b2)
+            Bs = self._array2list(x)
+            return self.NLL(Bs)
     
         # Function to minimize in case of one dixed POI
         def fixedNLL(x):
             b = np.zeros(self.nPOIs)
             b[:iPOI], b[iPOI], b[iPOI+1:] = x[:iPOI], vPOI, x[iPOI:]          
-            b1, b2 = b[:self.N1], b[self.N1:]
-            return self.NLL(b1, b2) 
+            Bs = self._array2list(b)
+            return self.NLL(Bs) 
         
-        # Initial starting point
-        if b1start.size == 0:
-            b1start = self.b1
-        if b2start.size == 0:
-            b2start = self.b2
-        x0 = np.concatenate([b1start, b2start])
+        # Initial starting point as matrix inverted truth bins
+        x0 = np.concatenate(self.Bs)
         
         # Final function to minimize
         nll = fullNLL
         
         if iPOI > -1:
             # Protection
-            if iPOI >= self.N1+self.N2:
+            if iPOI >= self.nPOIs:
                 msg = 'POI index ({}) must be lower than N1+N1 ({})'
                 raise NameError(msg.format(iPOI, self.nPOIs))
             
@@ -156,26 +158,24 @@ class model:
         return res
     
     
-    def unfold(self, b1start=np.array([]), b2start=np.array([])):
+    def unfold(self):
         '''
-        Return the two sets of unfolded bins which minimize 
+        Return the a list of p 1D array of unfolded bins which minimize 
         the negative log likelihood of the problem, and the minum
         nll value:
        
         >>> m = model()
-        >>> b1, b2, nllMin = m.unfold()
+        >>> Bs, nllMin = m.unfold()
         
-        b1start and b2start are the starting point of the 
-        minimization. Default is 'None', meaning that the 
-        starting point is given the result of matrix 
-        inversion B0 = R^{-1} x D.
+        The starting point of the minimization is given 
+        the result of matrix inversion B0 = R^{-1} x D.
         '''
         
         # Run the full minimization
-        res = self.minimizeNLL(b1start=b1start, b2start=b2start)
+        res = self.minimizeNLL()
         
         # Return the unfolded bins
-        return res.x[:self.N1], res.x[self.N1:], res.fun
+        return self._array2list(res.x), res.fun
     
     
     def profilePOI(self, iPOI, POImin, POImax, nScan=10):
@@ -204,23 +204,26 @@ class model:
     
     def postFitUncerPOIs(self):
         '''
-        Return central values and uncertainties of all parameters of 
+        Return a list of p 2D array. Each of these array contains 
+        the central values and uncertainties of all parameters of 
         interest, ie central value, negative uncertainty and 
-        positive uncertainty for each. Final measurement is then
+        positive uncertainty for each unfolded bins. The list covers
+        then the p unfoloded distribution. Final measurement is
             POI = nom -neg +pos
         
         >>> m = model(...)
         >>> poisHat = m.postFitUncerPOIs()
-        >>> for poi in poisHat:
-        >>>    nom, neg, pos = poi
+        >>> for distri in poisHat:
+        >>>    for unfBin in distri:
+        >>>       nom, neg, pos = unfBin
         '''
         
         # Result container
         postFitPOIs = np.zeros((self.nPOIs, 3))
         
         # Determine best fit central value first
-        b1, b2, nllMin = self.unfold()
-        b = np.concatenate([b1, b2])
+        Bs, nllMin = self.unfold()
+        b = np.concatenate(Bs)
         
         # Loop over POIs
         for iPOI in range(self.nPOIs):
@@ -262,5 +265,5 @@ class model:
             postFitPOIs[iPOI] = np.array([vM, vM-vL[iL], vR[iR]-vM])
         
         # Return all the results
-        return postFitPOIs
+        return self._array2list(postFitPOIs)
 
