@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy import optimize
 
 class model:
@@ -110,7 +111,7 @@ class model:
         return NLL
     
     
-    def minimizeNLL(self, iPOI=-1, vPOI=None, b1start=np.array([]), b2start=np.array([])):
+    def minimizeNLL(self, iPOI=-1, vPOI=None):
         '''
         Minimize the NLL with possibly one POI kept constant.
         This POI is selected by its index iPOI and the value
@@ -148,8 +149,8 @@ class model:
             x0 = np.delete(x0, iPOI)           
         
         # Bounds
-        xMax = np.max(x0) * 100
-        xMin = np.min(x0) / 100
+        xMax = np.max(x0) * 10
+        xMin = np.min(x0) / 10
         bounds = [(xMin, xMax)] * x0.shape[0]
         
         # Minimization
@@ -183,26 +184,72 @@ class model:
         '''
         Perform a likelihood profiling for the parameter
         of interest indexed by iPOI, which must be strictly
-        lower than N1+N2.
+        lower than n1+n2+...+np.
+        
+        An iterative approach is used to perform the profiling,
+        based on the obtained NLL. Due to numerical instabilities,
+        the postfit NLL might have unrelevant values. In that case,
+        the value the POI is slightly shifted, and the fit is 
+        performed again. The value is considered irrelevant if
+          + NLL[i] > 1000, for the first POI value, ie i==0
+          + NLL[i] > NLL[i-1] * 5
+        Five iterations are allowed, when reached, the point is 
+        disregarded.
         '''
         
         # Container for the results
         nlls = np.zeros(nScan)
-        pois = np.linspace(POImin, POImax, nScan)
+        pois = np.zeros(nScan)
+        dv   = (POImax -  POImin) / nScan
         
         # Loop over POI values
-        for i, v in enumerate(pois):
+        for i, v in enumerate(np.linspace(POImin, POImax, nScan)):
             
             # Minimized at fixed
             res = self.minimizeNLL(iPOI=iPOI, vPOI=v)
             
+            nllMin, iIter = res.fun, 0
+            if i==0:
+                criteria = lambda x: (x > 1000) and (iIter < 5)
+            else:
+                criteria = lambda x: (x > nlls[i-1]*5) and (iIter < 5)
+            while criteria(nllMin):
+                v += dv / 10.
+                res = self.minimizeNLL(iPOI=iPOI, vPOI=v)
+                nllMin = res.fun
+                iIter += 1
+
             # Store the result
-            nlls[i] = res.fun
+            if iIter < 4:
+                pois[i] = v 
+                nlls[i] = res.fun
             
         return pois, nlls
     
     
-    def postFitUncerPOIs(self):
+    def plotProfile(self, iPOI, POImin, POImax, nScan):    
+        
+        # Fit the NLL profile with a degree 3 polynom
+        def f(x, a0, a1, a2, a3):
+            return a0 + a1*x + a2*x**2 + a3*x**3
+        
+        # Run the profile and fit
+        val, nll = self.profilePOI(iPOI, POImin, POImax, nScan)
+        p, _ = optimize.curve_fit(f, val, nll)
+
+        # Compute the chi2
+        dy = f(val, *p) - nll
+        chi2 = np.mean(dy**2)
+        
+        # Plot values and fit function
+        plt.plot(val, nll, 'o', color='tab:blue')
+        v = np.linspace(val.min(), val.max(), 1000)
+        n = f(v, *p)
+        plt.plot(v, n, '--', color='tab:blue', label='$\\chi^{2}=$' + '{:.2f}'.format(chi2))
+        plt.legend()
+        
+    
+    def postFitUncerPOIs(self, chi2Tol=1e-2):
         '''
         Return a list of p 2D array. Each of these array contains 
         the central values and uncertainties of all parameters of 
@@ -216,6 +263,10 @@ class model:
         >>> for distri in poisHat:
         >>>    for unfBin in distri:
         >>>       nom, neg, pos = unfBin
+        
+        An error is raised if the fit quality is not good, 
+        which could be due to unstable LH minization, as treated
+        in the function profilePOI().
         '''
         
         # Result container
@@ -233,15 +284,15 @@ class model:
             
             # First determine the proper range to scan
             # by having at least a dNLL>10
-            dNLL, scale = 0, 0.2
-            while dNLL < 10:
-                v = POI * (1+scale)
+            dNLL, scale, v = 0, 0.05, POI
+            while dNLL < 20:
+                v = v * (1+scale)
                 res = self.minimizeNLL(iPOI, v)
                 dNLL = res.fun - nllMin
-                scale += 0.1
                 
             # Profile the POI on the proper scale with 10 points
-            pMin, pMax, nScan = POI*(1-scale), POI*(1+scale), 10
+            dPOI = v-POI
+            pMin, pMax, nScan = POI-dPOI, POI+dPOI, 10
             val, nll = self.profilePOI(iPOI, pMin, pMax, nScan)
             
             # Fit the NLL profile with a degree 3 polynom
@@ -254,6 +305,14 @@ class model:
             # Get a continuous evolution
             v = np.linspace(val.min(), val.max(), 1000)
             n = f(v, *p)
+            
+            # Compute the chi2 by hand
+            dy = f(val, *p) - nll
+            chi2 = np.mean(dy**2)
+            if chi2 > chi2Tol:
+                msg  = 'WARNING: the chi2 fit is {:.2f}, investigate the profile LH for \n'
+                msg += '--> (iPOI, Min, Max, N) = ({}, {},{}, {})'
+                print(msg.format(chi2, iPOI,  pMin, pMax, nScan))
             
             iM = np.argmin(n)
             nM, nL, nR = n[iM], n[:iM], n[iM:]
