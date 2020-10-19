@@ -38,18 +38,51 @@ class model:
         # Correlation between yields
         self.Corr = corr
 
-        # Unfolded bins by matrix inversion
-        self.Bs = [d @ np.linalg.inv(r) for d, r in zip(self.Ds, self.Rs) ]
+        # Unfolded bins by simple matrix inversion
+        self.Bs = [ d @ np.linalg.inv(r) for d, r in zip(self.Ds, self.Rs) ]
     
-                   
+        # Function to fit profile NLL, degree 3 polynom
+        self.profileFitFunc = lambda x, a0, a1, a2, a3: a0 + a1*x + a2*x**2 + a3*x**3
+        
+        
     def _array2list(self, x):
         '''
         Convert an 1D array of n1+...+np values into a list
         of p 1D arrays of shape n1, n2, ... np.
         '''
         return [x[n1:n2] for n1, n2 in zip(self._Nstart, self._Nend)]
-                   
+
+
+    def _fitProfile(self, vals, nlls):
+        '''
+        Perform a fit of a profile NLL by a degree 3 polynom
+        using a chi2-based fit. Return the best parameters
+        and the reduced chi2.
+
+        Arguments:
+        ---------
+         vals: 1D array of POI values
+         nlls: 1D array of profiled NLL values
+
+        Return: 
+        -------
+         p: tuple of optimized parameters
+         chi2: reduced chi2 value
+        '''
+
+        # Get the model function
+        f = self.profileFitFunc
         
+        # Fit values using the model function
+        p, _ = optimize.curve_fit(f, vals, nlls)
+            
+        # Compute the chi2 probability
+        exp, obs, nDoF = f(vals, *p), nlls, len(nlls)-1
+        chi2 = np.sum( (exp-obs)**2/exp ) / nDoF
+
+        return p, chi2
+
+    
     def NLL(self, Bs):
     
         '''
@@ -192,64 +225,71 @@ class model:
         the value the POI is slightly shifted, and the fit is 
         performed again. The value is considered irrelevant if
           + NLL[i] > 1000, for the first POI value, ie i==0
-          + NLL[i] > NLL[i-1] * 5
+          + NLL[i] > max(NLL), otherwise
         Five iterations are allowed, when reached, the point is 
         disregarded.
+
+        This strategy pre-supposes two things:
+          1. the scan start below mimizing POI value v
+          2. the NLL(v) is decreasing then increasing.
         '''
         
         # Container for the results
-        nlls = np.zeros(nScan)
-        pois = np.zeros(nScan)
-        dv   = (POImax -  POImin) / nScan
+        pois, nlls = [], []
+        dv = (POImax -  POImin) / nScan
         
         # Loop over POI values
-        for i, v in enumerate(np.linspace(POImin, POImax, nScan)):
+        for v in np.linspace(POImin, POImax, nScan):
             
-            # Minimized at fixed
-            res = self.minimizeNLL(iPOI=iPOI, vPOI=v)
-            
+            # Minimized at fixed POI value
+            vPOI = v
+            res = self.minimizeNLL(iPOI, vPOI)
+
+            # Make up a criteria to determine if the fit makes sense
             nllMin, iIter = res.fun, 0
-            if i==0:
-                criteria = lambda x: (x > 1000) and (iIter < 5)
-            else:
-                criteria = lambda x: (x > nlls[i-1]*5) and (iIter < 5)
-            while criteria(nllMin):
+            def badFit(x):
+                #if len(nlls) <= 3:
+                #    return (x > 1000) and (iIter < 5)
+                #else:
+                #    _, chi2 = self._fitProfile(np.array(pois), np.array(nlls))
+                #    return (chi2 > 2.0) and (iIter < 5)
+                if len(nlls) == 0: 
+                    return (x > 1000) and (iIter < 5)
+                else:
+                    return (x > max(nlls)) and (iIter < 5)
+                
+            # Repeat the fit until the result makes sense
+            while badFit(nllMin):
                 v += dv / 10.
-                res = self.minimizeNLL(iPOI=iPOI, vPOI=v)
+                res = self.minimizeNLL(iPOI, v)
                 nllMin = res.fun
                 iIter += 1
 
             # Store the result
-            if iIter < 4:
-                pois[i] = v 
-                nlls[i] = res.fun
+            if iIter < 5:
+                pois.append(v)
+                nlls.append(res.fun)
+            else:
+                print('POI={:.2e} is not kept (fit didn\'t converge)'.format(v))
             
-        return pois, nlls
+        return np.array(pois), np.array(nlls)
     
     
-    def plotProfile(self, iPOI, POImin, POImax, nScan):    
-        
-        # Fit the NLL profile with a degree 3 polynom
-        def f(x, a0, a1, a2, a3):
-            return a0 + a1*x + a2*x**2 + a3*x**3
+    def plotProfile(self, iPOI, POImin, POImax, nScan, label='', color='tab:blue'):    
         
         # Run the profile and fit
         val, nll = self.profilePOI(iPOI, POImin, POImax, nScan)
-        p, _ = optimize.curve_fit(f, val, nll)
+        p, chi2 = self._fitProfile(val, nll)
 
-        # Compute the chi2
-        dy = f(val, *p) - nll
-        chi2 = np.mean(dy**2)
-        
-        # Plot values and fit function
-        plt.plot(val, nll, 'o', color='tab:blue')
+        # Plot values and fitted function
+        plt.plot(val, nll, 'o', color=color)
         v = np.linspace(val.min(), val.max(), 1000)
-        n = f(v, *p)
-        plt.plot(v, n, '--', color='tab:blue', label='$\\chi^{2}=$' + '{:.2f}'.format(chi2))
+        n = self.profileFitFunc(v, *p)
+        plt.plot(v, n, '--', color=color, label=label+' $\\chi^{2}=$' + '{:.2f}'.format(chi2))
         plt.legend()
         
     
-    def postFitUncerPOIs(self, chi2Tol=1e-2):
+    def postFitUncerPOIs(self, chi2Tol=1.0):
         '''
         Return a list of p 2D array. Each of these array contains 
         the central values and uncertainties of all parameters of 
@@ -296,24 +336,18 @@ class model:
             val, nll = self.profilePOI(iPOI, pMin, pMax, nScan)
             
             # Fit the NLL profile with a degree 3 polynom
-            def f(x, a0, a1, a2, a3):
-                return a0 + a1*x + a2*x**2 + a3*x**3
+            p, chi2 = self._fitProfile(val, nll)
             
-            # Fit the function
-            p, _ = optimize.curve_fit(f, val, nll)
+            if chi2 > chi2Tol:
+                msg  = 'WARNING: chi2={:.2f}, investigate the profile LH for \n'
+                msg += '--> (iPOI, Min, Max, N) = ({}, {:.2e}, {:.2e}, {})'
+                print(msg.format(chi2, iPOI,  pMin, pMax, nScan))
             
             # Get a continuous evolution
             v = np.linspace(val.min(), val.max(), 1000)
-            n = f(v, *p)
-            
-            # Compute the chi2 by hand
-            dy = f(val, *p) - nll
-            chi2 = np.mean(dy**2)
-            if chi2 > chi2Tol:
-                msg  = 'WARNING: the chi2 fit is {:.2f}, investigate the profile LH for \n'
-                msg += '--> (iPOI, Min, Max, N) = ({}, {},{}, {})'
-                print(msg.format(chi2, iPOI,  pMin, pMax, nScan))
-            
+            n = self.profileFitFunc(v, *p)
+
+            # Find central value and xLeft, xRight for which dNLL = +1
             iM = np.argmin(n)
             nM, nL, nR = n[iM], n[:iM], n[iM:]
             vM, vL, vR = v[iM], v[:iM], v[iM:]
