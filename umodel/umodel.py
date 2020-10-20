@@ -34,7 +34,10 @@ class model:
         
         # Response matrices
         self.Rs = Rs
-
+        for i, r in enumerate(self.Rs):
+            if np.linalg.matrix_rank(r) < r.shape[0]:
+                print('Response matrix {} not inversible'.format(i))
+        
         # Correlation between yields
         self.Corr = corr
 
@@ -127,18 +130,23 @@ class model:
         obs = np.concatenate(self.Ds)
 
         # Mean vector of the normal PDF: truth x response
-        mu = np.concatenate([b @ r for (b, r) in zip(Bs, self.Rs)])
+        mu = np.concatenate([b @ r for b, r in zip(Bs, self.Rs)])
 
         # Correlation matrix of the normal PDF
-        Sigma = np.zeros((p, p)) + 1e-12 * np.diag([1]*p)
+        Sigma = np.zeros((p, p))
         for i in range(p):
             for j in range(p):
                 Sigma[i, j] = self.Corr[i, j] * np.sqrt(mu[i] * mu[j])
+        Sigma += 1e-6 * np.diag([1]*p)
 
+        if np.linalg.matrix_rank(Sigma) < p:
+            print('Matrice not inversible for Bs:')
+            print(Bs)
+        
         # Compute the log likelihood
         delta  = obs - mu
         SigInv = np.linalg.inv(Sigma)
-        NLL = delta.T @ SigInv @ delta
+        NLL    = delta @ SigInv @ delta.T
 
         # Return the result
         return NLL
@@ -289,7 +297,7 @@ class model:
         plt.legend()
         
     
-    def postFitUncerPOIs(self, chi2Tol=1.0):
+    def postFitUncerPOIs(self, iPOI=-1, chi2Tol=1.0):
         '''
         Return a list of p 2D array. Each of these array contains 
         the central values and uncertainties of all parameters of 
@@ -306,7 +314,17 @@ class model:
         
         An error is raised if the fit quality is not good, 
         which could be due to unstable LH minization, as treated
-        in the function profilePOI().
+        in the function profilePOI(). Not good is defined by the
+        chi2Tol argument.
+        
+        Argument:
+        ---------
+          - iPOI: index of POI to be determined (default -1, all)
+          - chi2Tol: chi2 tolerence for the NLL fit (default 1)
+
+        Return:
+          - [POI1s, POI2s, ...] where POIis is a 2D array (n, 3) when iPOI=-1
+          - np.array([nom, down, up]) when iPOI != -1
         '''
         
         # Result container
@@ -317,23 +335,26 @@ class model:
         b = np.concatenate(Bs)
         
         # Loop over POIs
-        for iPOI in range(self.nPOIs):
+        for ipoi in range(self.nPOIs):
+
+            if iPOI != -1 and ipoi != iPOI:
+                continue
             
             # Get the central value of the current POI
-            POI = b[iPOI]
+            POI = b[ipoi]
             
             # First determine the proper range to scan
             # by having at least a dNLL>10
             dNLL, scale, v = 0, 0.05, POI
             while dNLL < 20:
                 v = v * (1+scale)
-                res = self.minimizeNLL(iPOI, v)
+                res = self.minimizeNLL(ipoi, v)
                 dNLL = res.fun - nllMin
                 
             # Profile the POI on the proper scale with 10 points
             dPOI = v-POI
             pMin, pMax, nScan = POI-dPOI, POI+dPOI, 10
-            val, nll = self.profilePOI(iPOI, pMin, pMax, nScan)
+            val, nll = self.profilePOI(ipoi, pMin, pMax, nScan)
             
             # Fit the NLL profile with a degree 3 polynom
             p, chi2 = self._fitProfile(val, nll)
@@ -341,7 +362,7 @@ class model:
             if chi2 > chi2Tol:
                 msg  = 'WARNING: chi2={:.2f}, investigate the profile LH for \n'
                 msg += '--> (iPOI, Min, Max, N) = ({}, {:.2e}, {:.2e}, {})'
-                print(msg.format(chi2, iPOI,  pMin, pMax, nScan))
+                print(msg.format(chi2, ipoi,  pMin, pMax, nScan))
             
             # Get a continuous evolution
             v = np.linspace(val.min(), val.max(), 1000)
@@ -355,8 +376,12 @@ class model:
             iR = np.argmin(np.abs(nR-(nM+1)))
     
             # Store the result for the current POI 
-            postFitPOIs[iPOI] = np.array([vM, vM-vL[iL], vR[iR]-vM])
+            postFitPOIs[ipoi] = np.array([vM, vM-vL[iL], vR[iR]-vM])
         
         # Return all the results
-        return self._array2list(postFitPOIs)
+        if iPOI == -1:
+            return self._array2list(postFitPOIs)
+        else:
+            return postFitPOIs[iPOI]
+        
 
