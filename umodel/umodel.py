@@ -1,10 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import optimize
+import iminuit
 
 class model:
     
-    def __init__(self, Ds, Rs, corr):
+    def __init__(self, Ds, Rs, corr, backend='minuit'):
         
         '''
         'model' is a class describing unflolding model for two distributions
@@ -40,13 +41,16 @@ class model:
         
         # Correlation between yields
         self.Corr = corr
-
+        
         # Unfolded bins by simple matrix inversion
         self.Bs = [ d @ np.linalg.inv(r) for d, r in zip(self.Ds, self.Rs) ]
     
         # Function to fit profile NLL, degree 3 polynom
         self.profileFitFunc = lambda x, a0, a1, a2, a3: a0 + a1*x + a2*x**2 + a3*x**3
-        
+
+        # Backend for minimization problems
+        self.backend = backend
+
         
     def _array2list(self, x):
         '''
@@ -81,8 +85,7 @@ class model:
             
         # Compute the chi2 probability
         exp, obs, nDoF = f(vals, *p), nlls, len(nlls)-1
-        chi2 = np.sum( (exp-obs)**2/exp ) / nDoF
-
+        chi2 = np.sum( (exp-obs)**2 / np.abs(exp) ) / nDoF
         return p, chi2
 
     
@@ -131,20 +134,12 @@ class model:
 
         # Mean vector of the normal PDF: truth x response
         mu = np.concatenate([b @ r for b, r in zip(Bs, self.Rs)])
-
+        
         # Correlation matrix of the normal PDF
-        Sigma = np.zeros((p, p))
-        for i in range(p):
-            for j in range(p):
-                Sigma[i, j] = self.Corr[i, j] * np.sqrt(mu[i] * mu[j])
-        Sigma += 1e-6 * np.diag([1]*p)
-
-        if np.linalg.matrix_rank(Sigma) < p:
-            print('Matrice not inversible for Bs:')
-            print(Bs)
+        Sigma = self.Corr + 1e-12 * np.eye(p)
         
         # Compute the log likelihood
-        delta  = obs - mu
+        delta  = (obs - mu) / np.sqrt(np.abs(mu))
         SigInv = np.linalg.inv(Sigma)
         NLL    = delta @ SigInv @ delta.T
 
@@ -195,8 +190,12 @@ class model:
         bounds = [(xMin, xMax)] * x0.shape[0]
         
         # Minimization
-        res = optimize.minimize(nll, x0=x0, tol=1e-6, method='Powell', bounds=bounds)
-        
+        res = None
+        if self.backend == 'scipy':
+            res = optimize.minimize(nll, x0=x0, tol=1e-6, method='Powell', bounds=bounds)
+        if self.backend == 'minuit':
+            res = iminuit.minimize(nll, x0=x0, bounds=bounds)
+            
         return res
     
     
@@ -252,33 +251,36 @@ class model:
             # Minimized at fixed POI value
             vPOI = v
             res = self.minimizeNLL(iPOI, vPOI)
-
+            
             # Make up a criteria to determine if the fit makes sense
-            nllMin, iIter = res.fun, 0
-            def badFit(x):
-                #if len(nlls) <= 3:
-                #    return (x > 1000) and (iIter < 5)
-                #else:
-                #    _, chi2 = self._fitProfile(np.array(pois), np.array(nlls))
-                #    return (chi2 > 2.0) and (iIter < 5)
-                if len(nlls) == 0: 
-                    return (x > 1000) and (iIter < 5)
-                else:
-                    return (x > max(nlls)) and (iIter < 5)
+            #nllMin, iIter = res.fun, 0
+            #def badFit(x):
+            #    #if len(nlls) <= 3:
+            #    #    return (x > 1000) and (iIter < 5)
+            #    #else:
+            #    #    _, chi2 = self._fitProfile(np.array(pois), np.array(nlls))
+            #    #    return (chi2 > 2.0) and (iIter < 5)
+            #    if len(nlls) == 0: 
+            #        return (x > 1000) and (iIter < 5)
+            #    else:
+            #        return (x > max(nlls)) and (iIter < 5)
                 
             # Repeat the fit until the result makes sense
-            while badFit(nllMin):
-                v += dv / 10.
-                res = self.minimizeNLL(iPOI, v)
-                nllMin = res.fun
-                iIter += 1
+            #while badFit(nllMin):
+            #    v += dv / 10.
+            #    res = self.minimizeNLL(iPOI, v)
+            #    nllMin = res.fun
+            #    iIter += 1
 
             # Store the result
-            if iIter < 5:
-                pois.append(v)
-                nlls.append(res.fun)
-            else:
-                print('POI={:.2e} is not kept (fit didn\'t converge)'.format(v))
+            #if iIter < 5:
+            #    pois.append(v)
+            #    nlls.append(res.fun)
+            #else:
+            #    print('POI={:.2e} is not kept (fit didn\'t converge)'.format(v))
+            pois.append(v)
+            nlls.append(res.fun)
+            
             
         return np.array(pois), np.array(nlls)
     
