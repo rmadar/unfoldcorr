@@ -59,7 +59,7 @@ class model:
         '''
         return [x[n1:n2] for n1, n2 in zip(self._Nstart, self._Nend)]
 
-
+    
     def _fitProfile(self, vals, nlls):
         '''
         Perform a fit of a profile NLL by a degree 3 polynom
@@ -289,7 +289,7 @@ class model:
         
         # Run the profile and fit
         val, nll = self.profilePOI(iPOI, POImin, POImax, nScan)
-        p, chi2 = self._fitProfile(val, nll)
+        p, chi2  = self._fitProfile(val, nll)
 
         # Plot values and fitted function
         plt.plot(val, nll, 'o', color=color)
